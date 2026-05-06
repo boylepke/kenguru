@@ -1,0 +1,8 @@
+python-can>=4.0
+cantools>=39.0
+opencv-python>=4.8
+Pillow>=10.0
+matplotlib>=3.8
+# Optional — needed for MF4 export only
+asammdf>=7.0
+numpy>=1.26

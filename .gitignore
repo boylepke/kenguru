@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Application data
+*.blf
+*.mf4
+*.pts
+*.sync
+*_info.txt
+*.avi
+*.mp4
+
+# User preferences (generated at runtime)
+# Stored in %APPDATA%/KenguruCANMonitor — not in the repo
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
