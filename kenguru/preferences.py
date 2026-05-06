@@ -2,7 +2,7 @@
 kenguru.preferences
 ~~~~~~~~~~~~~~~~~~~
 PreferencesManager: default values, JSON persistence, and the Preferences
-Toplevel dialog (General + Colors tabs).
+Toplevel dialog (General tab only — colours are fixed in theme.py).
 """
 from __future__ import annotations
 
@@ -10,41 +10,30 @@ import json
 import os
 import tkinter as tk
 from datetime import datetime
-from tkinter import colorchooser, filedialog, ttk
+from tkinter import filedialog, ttk
 from typing import Callable
 
 from . import theme as th
 
-# Keys that live only in RAM (runtime counters etc.) and must not be
-# written to disk or exported.
+# Keys that live only in RAM and must not be written to disk or exported.
 PREFS_SKIP: frozenset[str] = frozenset({"filename_counter"})
 
 _DEFAULT_PREFS: dict = {
-    "save_dir":          os.path.join(os.path.expanduser("~"), "Documents", "CAN_Logs"),
-    "filename_mode":     "timestamp",
-    "filename_prefix":   "CAN_Record",
-    "filename_counter":  1,
-    "meta_project":      "",
-    "meta_vehicle":      "",
-    "meta_driver":       "",
-    "meta_config":       "",
-    "meta_comment":      "",
-    "f1_label":          "F1",
-    "f1_exe":            "",
-    "f2_label":          "F2",
-    "f2_exe":            "",
-    "f3_label":          "F3",
-    "f3_exe":            "",
-    # ── Colours ──────────────────────────────────────────────────────
-    "color_dark_bg":     "#1e1e2e",
-    "color_panel_bg":    "#2a2a3e",
-    "color_accent":      "#7c6af7",
-    "color_accent2":     "#48cfad",
-    "color_text_fg":     "#cdd6f4",
-    "color_muted":       "#6c7086",
-    "color_row_odd":     "#242436",
-    "color_row_even":    "#1e1e2e",
-    "color_sel_bg":      "#45475a",
+    "save_dir":         os.path.join(os.path.expanduser("~"), "Documents", "CAN_Logs"),
+    "filename_mode":    "timestamp",
+    "filename_prefix":  "CAN_Record",
+    "filename_counter": 1,
+    "meta_project":     "",
+    "meta_vehicle":     "",
+    "meta_driver":      "",
+    "meta_config":      "",
+    "meta_comment":     "",
+    "f1_label":         "F1",
+    "f1_exe":           "",
+    "f2_label":         "F2",
+    "f2_exe":           "",
+    "f3_label":         "F3",
+    "f3_exe":           "",
 }
 
 
@@ -73,7 +62,7 @@ class PreferencesManager:
                 if k in saved and k not in PREFS_SKIP:
                     self.prefs[k] = saved[k]
         except (FileNotFoundError, Exception):
-            pass  # first run or corrupt file — use defaults
+            pass
 
     def save(self) -> None:
         """Persist current preferences to disk (non-fatal on failure)."""
@@ -149,10 +138,9 @@ class PreferencesManager:
         Parameters
         ----------
         parent:
-            Owner window (used for grab_set positioning).
+            Owner window.
         on_apply:
-            Callback fired after the user clicks OK so the caller can
-            re-apply the theme and refresh any dependent widgets.
+            Callback fired after OK so the caller can refresh dependent widgets.
         """
         win = tk.Toplevel(parent)
         win.title("Preferences")
@@ -164,7 +152,7 @@ class PreferencesManager:
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 4))
 
         # ════════════════════════════════════════════════════════════
-        #  TAB 1 — General
+        #  TAB — General
         # ════════════════════════════════════════════════════════════
         gen_tab = ttk.Frame(nb)
         nb.add(gen_tab, text="  General  ")
@@ -173,7 +161,7 @@ class PreferencesManager:
         dir_frame = ttk.LabelFrame(gen_tab, text="Recording Save Directory", padding=8)
         dir_frame.pack(fill="x", padx=12, pady=(12, 4))
 
-        dir_var = tk.StringVar(value=self.prefs["save_dir"])
+        dir_var   = tk.StringVar(value=self.prefs["save_dir"])
         dir_entry = ttk.Entry(dir_frame, textvariable=dir_var, width=52)
         dir_entry.grid(row=0, column=0, padx=(0, 6), pady=4, sticky="we")
 
@@ -195,7 +183,6 @@ class PreferencesManager:
             name_frame, text="Timestamp  (e.g. CAN_Record_20250601_143012.blf)",
             variable=mode_var, value="timestamp",
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
-
         ttk.Radiobutton(
             name_frame, text="Prefix + counter  (e.g.",
             variable=mode_var, value="prefix_counter",
@@ -205,10 +192,12 @@ class PreferencesManager:
         counter_var = tk.IntVar(value=self.prefs["filename_counter"])
         ttk.Entry(name_frame, textvariable=prefix_var, width=18).grid(
             row=1, column=1, padx=4, pady=2)
-        ttk.Label(name_frame, text="next #:").grid(row=1, column=2, padx=(8, 2), pady=2)
+        ttk.Label(name_frame, text="next #:").grid(
+            row=1, column=2, padx=(8, 2), pady=2)
         ttk.Spinbox(name_frame, textvariable=counter_var,
                     from_=1, to=99999, width=7).grid(row=1, column=3, pady=2)
-        ttk.Label(name_frame, text=".blf)").grid(row=1, column=4, padx=(2, 0), pady=2)
+        ttk.Label(name_frame, text=".blf)").grid(
+            row=1, column=4, padx=(2, 0), pady=2)
 
         preview_var = tk.StringVar()
 
@@ -299,101 +288,12 @@ class PreferencesManager:
         fn_frame.columnconfigure(3, weight=1)
 
         # ════════════════════════════════════════════════════════════
-        #  TAB 2 — Colors
-        # ════════════════════════════════════════════════════════════
-        col_tab = ttk.Frame(nb)
-        nb.add(col_tab, text="  Colors  ")
-
-        COLOR_SLOTS = [
-            ("Background",        "color_dark_bg"),
-            ("Panel / Fields",    "color_panel_bg"),
-            ("Accent (primary)",  "color_accent"),
-            ("Accent (secondary)","color_accent2"),
-            ("Text",              "color_text_fg"),
-            ("Muted / Borders",   "color_muted"),
-            ("Row (odd)",         "color_row_odd"),
-            ("Row (even)",        "color_row_even"),
-            ("Selection",         "color_sel_bg"),
-        ]
-        color_vars = {key: tk.StringVar(value=self.prefs[key])
-                      for _, key in COLOR_SLOTS}
-
-        # ── Preset buttons ───────────────────────────────────────────
-        preset_frame = ttk.LabelFrame(col_tab, text="Presets", padding=8)
-        preset_frame.pack(fill="x", padx=12, pady=(12, 4))
-
-        def apply_preset(preset_name: str) -> None:
-            p = th.PRESETS[preset_name]
-            for key, var in color_vars.items():
-                if key in p:
-                    var.set(p[key])
-            _refresh_swatches()
-
-        for name in th.PRESETS:
-            ttk.Button(preset_frame, text=name,
-                       command=lambda n=name: apply_preset(n)).pack(
-                side="left", padx=4, pady=2)
-
-        # ── Colour slots grid ────────────────────────────────────────
-        slots_frame = ttk.LabelFrame(col_tab, text="Individual Colours", padding=10)
-        slots_frame.pack(fill="x", padx=12, pady=4)
-
-        swatch_buttons: dict[str, tk.Button] = {}
-
-        def _pick_color(key: str) -> None:
-            result = colorchooser.askcolor(
-                color=color_vars[key].get(), title="Choose colour", parent=win)
-            if result and result[1]:
-                color_vars[key].set(result[1].lower())
-                _refresh_swatches()
-
-        def _refresh_swatches() -> None:
-            for key, btn in swatch_buttons.items():
-                hex_val = color_vars[key].get()
-                try:
-                    r = int(hex_val[1:3], 16)
-                    g = int(hex_val[3:5], 16)
-                    b = int(hex_val[5:7], 16)
-                    brightness = (r * 299 + g * 587 + b * 114) / 1000
-                    fg_txt = "#000000" if brightness > 128 else "#ffffff"
-                except Exception:
-                    fg_txt = "#ffffff"
-                btn.configure(bg=hex_val, fg=fg_txt,
-                              activebackground=hex_val, activeforeground=fg_txt,
-                              text=hex_val)
-
-        for row_i, (label, key) in enumerate(COLOR_SLOTS):
-            ttk.Label(slots_frame, text=label, width=20, anchor="w").grid(
-                row=row_i, column=0, sticky="w", padx=(0, 10), pady=4)
-            swatch = tk.Button(
-                slots_frame, text=color_vars[key].get(),
-                width=12, relief="flat", cursor="hand2",
-                font=("Consolas", 9, "bold"),
-                command=lambda k=key: _pick_color(k),
-            )
-            swatch.grid(row=row_i, column=1, padx=4, pady=4, sticky="w")
-            swatch_buttons[key] = swatch
-            ttk.Entry(slots_frame, textvariable=color_vars[key],
-                      width=10).grid(row=row_i, column=2,
-                                     padx=(4, 0), pady=4, sticky="w")
-            color_vars[key].trace_add("write", lambda *_, k=key: _refresh_swatches())
-
-        _refresh_swatches()
-
-        ttk.Label(col_tab,
-                  text="Changes apply immediately when you click OK.  "
-                       "Restart is not required.",
-                  foreground=th.MUTED, font=("Consolas", 9),
-                  ).pack(padx=12, pady=(6, 2), anchor="w")
-
-        # ════════════════════════════════════════════════════════════
         #  Bottom bar — OK / Cancel
         # ════════════════════════════════════════════════════════════
         btn_frame = ttk.Frame(win)
         btn_frame.pack(fill="x", pady=(4, 10), padx=8)
 
         def apply_and_close() -> None:
-            # General tab
             self.prefs["save_dir"]         = dir_var.get().strip() or self.prefs["save_dir"]
             self.prefs["filename_mode"]    = mode_var.get()
             self.prefs["filename_prefix"]  = prefix_var.get().strip() or "CAN_Record"
@@ -403,9 +303,6 @@ class PreferencesManager:
             self.prefs["meta_comment"] = comment_text.get("1.0", "end-1c").strip()
             for key, var in fn_vars.items():
                 self.prefs[key] = var.get().strip()
-            # Colors tab
-            for key, var in color_vars.items():
-                self.prefs[key] = var.get().strip() or self.prefs[key]
             self.save()
             on_apply()
             win.destroy()
