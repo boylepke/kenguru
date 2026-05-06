@@ -4,12 +4,14 @@ kenguru.can_session
 CANSession: CAN bus connection, DBC loading, recording lifecycle, and the
 background receive loop.
 
-Coupling note
-~~~~~~~~~~~~~
-``CANSession`` holds a back-reference to ``CANLoggerApp`` (``self._app``)
-to access UI widgets and to drive ``CameraManager`` start/stop.  The
-shared state that the UI update loop reads (``signal_latest_values``,
-``signal_last_seen``) is owned here and accessed under ``self._lock``.
+Chunk recording
+~~~~~~~~~~~~~~~
+When ``prefs["chunk_duration"]`` is non-zero, the receive loop calls
+``_rotate_chunk()`` every N seconds.  This closes the current BLF writer,
+writes the .pts / .sync / sidecar files for the completed chunk, opens a
+fresh BLF, and signals the camera to start a new video file — all from the
+receive thread using only thread-safe file I/O and the camera's own lock.
+No Tkinter calls are made during rotation.
 """
 from __future__ import annotations
 
@@ -34,42 +36,43 @@ class CANSession:
 
         # ── CAN bus ───────────────────────────────────────────────
         self.bus:  can.BusABC | VirtualCANBus | None = None
-        self.db:   object | None = None      # first loaded DB (VirtualCANBus compat)
-        self.dbs:  list[tuple[str, object]]  = []   # [(path, cantools_db), …]
+        self.db:   object | None = None
+        self.dbs:  list[tuple[str, object]] = []
 
         # ── Signal display ────────────────────────────────────────
-        self.selected_signals:    dict = {}  # full_name → {frame_id, sig_name, unit, …}
+        self.selected_signals:     dict = {}
         self.signal_latest_values: dict = {}
-        self.signal_last_seen:     dict = {}  # full_name → "HH:MM:SS.mmm"
-        self._frame_id_lookup:    dict = {}   # frame_id → [(full_name, sig_name)]
+        self.signal_last_seen:     dict = {}
+        self._frame_id_lookup:     dict = {}
 
         # ── Recording state ───────────────────────────────────────
-        self._running:     threading.Event  = threading.Event()
-        self.recording:    bool             = False
-        self.blf_writer:   can.BLFWriter | None = None
-        self.last_blf_filename: str | None  = None
+        self._running:          threading.Event       = threading.Event()
+        self.recording:         bool                  = False
+        self.blf_writer:        can.BLFWriter | None  = None
+        self.last_blf_filename: str | None            = None
 
         # ── Threading primitives ──────────────────────────────────
-        self._lock:        threading.Lock   = threading.Lock()
-        self._stop_event:  threading.Event  = threading.Event()
-        # SYNC: gate that fires both camera writer and BLF writer together,
-        # making the CAN-to-video offset structurally zero.
-        self._record_go:   threading.Event  = threading.Event()
+        self._lock:       threading.Lock  = threading.Lock()
+        self._stop_event: threading.Event = threading.Event()
+        self._record_go:  threading.Event = threading.Event()
 
-        # ── Timing references ─────────────────────────────────────
-        self._blf_start_time:         float       = 0.0
-        self._first_can_msg_time:     float | None = None   # time.time() of first recorded msg
+        # ── Timing references (reset on each chunk) ───────────────
+        self._blf_start_time:          float       = 0.0
+        self._first_can_msg_time:      float | None = None
         self._first_can_msg_wall_time: float | None = None
-        self._record_start_mono:      float       = 0.0    # time.monotonic() at _do_start()
-        self._first_can_msg_mono:     float | None = None  # mono seconds from rec start to msg 1
+        self._record_start_mono:       float        = 0.0
+        self._first_can_msg_mono:      float | None = None
+
+        # ── Chunk tracking ────────────────────────────────────────
+        self._chunk_start_mono: float = 0.0   # monotonic time when current chunk started
 
         # ── Recording size tracking ───────────────────────────────
-        self._rec_size_history: deque = deque()  # (monotonic_time, byte_size)
+        self._rec_size_history: deque = deque()
+        self._update_rate_hz:   int   = 10
 
     # ── DBC management ───────────────────────────────────────────────
 
     def load_dbc(self) -> None:
-        """Open a file dialog and add one or more DBC files."""
         paths = filedialog.askopenfilenames(
             title="Add DBC file(s)",
             filetypes=[("DBC files", "*.dbc"), ("All files", "*.*")],
@@ -106,13 +109,12 @@ class CANSession:
                 continue
 
             self.dbs.append((path, db))
-            label = os.path.basename(path) + ("  ⚠ non-strict" if non_strict else "")
+            label = os.path.basename(path) + ("  non-strict" if non_strict else "")
             dbc_listbox = getattr(self._app, "dbc_listbox", None)
             if dbc_listbox:
                 dbc_listbox.insert("end", label)
             loaded.append(label)
 
-        # Keep self.db pointing at the first loaded DB for VirtualCANBus compat
         self.db = self.dbs[0][1] if self.dbs else None
         if loaded:
             msg = f"Loaded: {', '.join(loaded)}"
@@ -121,7 +123,6 @@ class CANSession:
             messagebox.showinfo("DBC loaded", msg)
 
     def remove_dbc(self) -> None:
-        """Remove the DBC currently selected in the listbox."""
         dbc_listbox = getattr(self._app, "dbc_listbox", None)
         if dbc_listbox is None:
             return
@@ -129,31 +130,23 @@ class CANSession:
         if not sel:
             messagebox.showwarning("Remove DBC", "Select a DBC in the list first.")
             return
-        idx    = sel[0]
-        path, _ = self.dbs[idx]
+        idx = sel[0]
         self.dbs.pop(idx)
         dbc_listbox.delete(idx)
         self.db = self.dbs[0][1] if self.dbs else None
 
-        # Remove selected signals that only existed in the removed DBC
         all_valid = {
             f"{msg.name}.{sig.name}"
             for _, db in self.dbs
             for msg in db.messages
             for sig in msg.signals
         }
-        removed = [k for k in list(self.selected_signals) if k not in all_valid]
-        for k in removed:
+        for k in [k for k in list(self.selected_signals) if k not in all_valid]:
             self.selected_signals.pop(k, None)
         self.rebuild_frame_lookup()
         self._app.initialize_tree()
 
     def _db_decode(self, arb_id: int, data: bytes):
-        """Decode *data* using the first DBC that recognises *arb_id*.
-
-        Returns ``(cantools.Message, decoded_dict)``.
-        Raises ``KeyError`` if no loaded DBC matches the ID.
-        """
         for _, db in self.dbs:
             try:
                 decoded = db.decode_message(arb_id, data)
@@ -164,12 +157,10 @@ class CANSession:
         raise KeyError(f"0x{arb_id:X}")
 
     def db_all_messages(self):
-        """Yield every cantools Message object from all loaded DBCs."""
         for _, db in self.dbs:
             yield from db.messages
 
     def rebuild_frame_lookup(self) -> None:
-        """Rebuild the O(1) frame_id → [(full_name, sig_name)] dispatch map."""
         self._frame_id_lookup.clear()
         for full_name, info in self.selected_signals.items():
             fid = info["frame_id"]
@@ -179,12 +170,6 @@ class CANSession:
     # ── Connection ────────────────────────────────────────────────────
 
     def connect(self, silent: bool = False) -> None:
-        """Open the CAN bus selected in the UI.
-
-        ``silent=True`` suppresses the success popup — used when called
-        automatically from ``_start()`` so recording begins without a
-        blocking dialog accumulating stale hardware messages.
-        """
         interface = self._app.interface_var.get()
         fd_mode   = self._app.fd_var.get()
         try:
@@ -254,12 +239,11 @@ class CANSession:
             messagebox.showerror("Error", f"Connection failed:\n{e}")
 
     def auto_detect_channels(self) -> None:
-        """Populate the channel dropdown for the selected interface."""
         interface = self._app.interface_var.get()
         try:
             if interface == "Vector":
-                configs   = can.detect_available_configs(interfaces=["vector"])
-                channels  = [str(cfg["channel"]) for cfg in configs] or ["0"]
+                configs  = can.detect_available_configs(interfaces=["vector"])
+                channels = [str(cfg["channel"]) for cfg in configs] or ["0"]
                 self._app.channel_label.config(text="Vector Channel:")
                 self._app.channel_dropdown.config(state="readonly")
                 self._app.fd_check.state(["!disabled"])
@@ -270,8 +254,8 @@ class CANSession:
                 self._app.fd_var.set(False)
                 self._app._on_fd_toggled()
                 self._app.fd_check.state(["disabled"])
-            else:  # Virtual CAN
-                channels = ["—"]
+            else:
+                channels = ["--"]
                 self._app.channel_label.config(text="Channel:")
                 self._app.channel_dropdown.config(state="disabled")
                 self._app.fd_check.state(["!disabled"])
@@ -281,16 +265,66 @@ class CANSession:
         self._app.channel_dropdown["values"] = channels
         self._app.channel_var.set(channels[0])
 
+    # ── Filename helpers ──────────────────────────────────────────────
+
+    def _next_filename(self) -> str:
+        """Generate the next BLF filename according to the current naming prefs."""
+        prefs    = self._app.prefs_mgr.prefs
+        base_dir = prefs["save_dir"]
+        if prefs["filename_mode"] == "prefix_counter":
+            prefix  = prefs["filename_prefix"]
+            counter = prefs["filename_counter"]
+            stem    = f"{prefix}_{counter:04d}"
+            prefs["filename_counter"] = counter + 1
+        else:
+            stem = f"CAN_Record_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        return os.path.join(base_dir, f"{stem}.blf")
+
+    def _reset_timing(self) -> None:
+        """Reset all per-chunk timing references."""
+        self._blf_start_time          = time.time()
+        self._first_can_msg_time      = None
+        self._first_can_msg_wall_time = None
+        self._record_start_mono       = time.monotonic()
+        self._first_can_msg_mono      = None
+        self._chunk_start_mono        = time.monotonic()
+
+    # ── Sync file helpers ─────────────────────────────────────────────
+
+    def _write_sync_files(self, blf_path: str, blf_t0,
+                          frame_pts: list, first_frame_time) -> None:
+        """Write .pts and .sync sidecar files for a completed chunk."""
+        if not blf_path:
+            return
+        stem = os.path.splitext(blf_path)[0]
+
+        if frame_pts:
+            mono_ref = self._first_can_msg_mono \
+                       if self._first_can_msg_mono is not None \
+                       else (time.monotonic() - self._record_start_mono)
+            try:
+                with open(stem + ".pts", "w") as f:
+                    f.write(f"{mono_ref:.6f}\n")
+                    for t in frame_pts:
+                        f.write(f"{t:.6f}\n")
+            except Exception:
+                pass
+
+        if first_frame_time is not None:
+            ref         = blf_t0 or self._first_can_msg_time or self._blf_start_time
+            true_offset = first_frame_time - ref
+            try:
+                with open(stem + ".sync", "w") as f:
+                    f.write(f"{true_offset:.6f}\n")
+            except Exception:
+                pass
+
     # ── Recording lifecycle ───────────────────────────────────────────
 
-    def start_recording(self) -> None:
-        self._start(recording=True)
-
-    def start_listen_only(self) -> None:
-        self._start(recording=False)
+    def start_recording(self)   -> None: self._start(recording=True)
+    def start_listen_only(self) -> None: self._start(recording=False)
 
     def _start(self, recording: bool) -> None:
-        """Validate preconditions, then commit."""
         if self._running.is_set():
             messagebox.showwarning("Warning", "Already running. Stop first.")
             return
@@ -304,27 +338,13 @@ class CANSession:
         self._do_start(recording)
 
     def _do_start(self, recording: bool) -> None:
-        prefs = self._app.prefs_mgr.prefs
-
         if recording:
+            prefs    = self._app.prefs_mgr.prefs
             base_dir = prefs["save_dir"]
             os.makedirs(base_dir, exist_ok=True)
-
-            if prefs["filename_mode"] == "prefix_counter":
-                prefix  = prefs["filename_prefix"]
-                counter = prefs["filename_counter"]
-                stem    = f"{prefix}_{counter:04d}"
-                prefs["filename_counter"] = counter + 1
-            else:
-                stem = f"CAN_Record_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-            filename = os.path.join(base_dir, f"{stem}.blf")
-            self.last_blf_filename      = filename
-            self._blf_start_time        = time.time()
-            self._first_can_msg_time    = None
-            self._first_can_msg_wall_time = None
-            self._record_start_mono     = time.monotonic()
-            self._first_can_msg_mono    = None
+            filename = self._next_filename()
+            self.last_blf_filename = filename
+            self._reset_timing()
             try:
                 self.blf_writer = can.BLFWriter(filename)
             except Exception as e:
@@ -332,12 +352,9 @@ class CANSession:
                 return
 
         self._running.set()
-        self.recording    = recording
+        self.recording   = recording
         self._stop_event.clear()
 
-        # SYNC FIX: arm gate before starting either thread.
-        # In recording mode the receive_loop blocks here until the VideoWriter
-        # is assigned below — both streams start from the same instant.
         if recording:
             self._record_go.clear()
         else:
@@ -357,16 +374,15 @@ class CANSession:
     def stop(self) -> None:
         was_recording = self.recording
         self._stop_event.set()
-        self._record_go.set()  # unblock receive_loop if still waiting at gate
+        self._record_go.set()
         self._running.clear()
         self.recording = False
 
+        blf_t0 = None
         if self.blf_writer:
-            _blf_t0 = getattr(self.blf_writer, "start_timestamp", None)
+            blf_t0 = getattr(self.blf_writer, "start_timestamp", None)
             self.blf_writer.stop()
             self.blf_writer = None
-        else:
-            _blf_t0 = None
 
         if self.bus:
             try:
@@ -379,45 +395,52 @@ class CANSession:
         self._rec_size_history.clear()
         self._app.rec_stats_label.pack_forget()
 
-        # Stop video and collect sync metadata from CameraManager
         vid_file, frame_pts, first_frame_time = self._app.camera.stop_recording()
 
-        # ── Write per-frame timestamps (.pts) — primary sync method ──
-        if was_recording and self.last_blf_filename and frame_pts:
-            _mono_ref = self._first_can_msg_mono if self._first_can_msg_mono is not None \
-                        else (time.monotonic() - self._record_start_mono)
-            pts_path = os.path.splitext(self.last_blf_filename)[0] + ".pts"
-            try:
-                with open(pts_path, "w") as f:
-                    f.write(f"{_mono_ref:.6f}\n")
-                    for t in frame_pts:
-                        f.write(f"{t:.6f}\n")
-            except Exception:
-                pass
+        if was_recording and self.last_blf_filename:
+            self._write_sync_files(
+                self.last_blf_filename, blf_t0, frame_pts, first_frame_time)
+            if os.path.exists(self.last_blf_filename):
+                self._app.export_mgr.write_sidecar_txt(self.last_blf_filename)
 
-        # ── Write legacy .sync offset (fallback for older recordings) ──
-        if was_recording and self.last_blf_filename and first_frame_time is not None:
-            ref = _blf_t0 or self._first_can_msg_time or self._blf_start_time
-            true_offset = first_frame_time - ref
-            try:
-                with open(os.path.splitext(self.last_blf_filename)[0] + ".sync", "w") as f:
-                    f.write(f"{true_offset:.6f}\n")
-            except Exception:
-                pass
+    # ── Chunk rotation ────────────────────────────────────────────────
 
-        # ── Auto-write sidecar .txt ───────────────────────────────────
-        if was_recording and self.last_blf_filename and \
-                os.path.exists(self.last_blf_filename):
+    def _rotate_chunk(self) -> None:
+        """Close the current chunk and open the next one.
+
+        Called exclusively from the receive loop thread — uses only
+        thread-safe file I/O and camera locks, no Tkinter calls.
+        """
+        # 1. Finalise current BLF
+        blf_t0 = getattr(self.blf_writer, "start_timestamp", None)
+        self.blf_writer.stop()
+
+        # 2. Finalise current video chunk and collect sync data
+        vid_file, frame_pts, first_frame_time = self._app.camera.stop_recording()
+
+        # 3. Write sync + sidecar for the completed chunk
+        self._write_sync_files(
+            self.last_blf_filename, blf_t0, frame_pts, first_frame_time)
+        if os.path.exists(self.last_blf_filename):
             self._app.export_mgr.write_sidecar_txt(self.last_blf_filename)
+
+        # 4. Generate new filename and reset timing
+        new_filename           = self._next_filename()
+        self.last_blf_filename = new_filename
+        self._reset_timing()
+
+        # 5. Open new BLF writer
+        self.blf_writer = can.BLFWriter(new_filename)
+
+        # 6. Start new video chunk
+        self._app.camera.start_recording(new_filename)
 
     # ── Receive loop ─────────────────────────────────────────────────
 
     def receive_loop(self) -> None:
-        """Background thread: read messages, write BLF, update signal state."""
+        """Background thread: read messages, write BLF, rotate chunks."""
 
-        # Drain stale hardware buffer before recording starts so that the
-        # first message written to BLF (which sets blf_t0) is genuinely
-        # real-time and the CAN X-axis is not shifted forward.
+        # Drain stale hardware buffer before recording starts
         if self.recording and self.bus is not None:
             while True:
                 try:
@@ -426,6 +449,9 @@ class CANSession:
                     break
                 if stale is None:
                     break
+
+        # Read chunk duration once at loop start (immutable for this session)
+        chunk_secs = self._app.prefs_mgr.prefs.get("chunk_duration", 0)
 
         while not self._stop_event.is_set():
             bus = self.bus
@@ -450,15 +476,22 @@ class CANSession:
                 continue
 
             if self.recording and self.blf_writer:
-                # Block until the VideoWriter gate fires — zero overhead after
-                # the first message because the event stays set.
                 self._record_go.wait()
                 self.blf_writer.on_message_received(msg)
+
                 if self._first_can_msg_time is None:
-                    self._first_can_msg_time     = msg.timestamp
+                    self._first_can_msg_time      = msg.timestamp
                     self._first_can_msg_wall_time = time.time()
                     self._first_can_msg_mono      = \
                         time.monotonic() - self._record_start_mono
+
+                # ── Chunk boundary check ──────────────────────────
+                if chunk_secs > 0 and \
+                        (time.monotonic() - self._chunk_start_mono) >= chunk_secs:
+                    try:
+                        self._rotate_chunk()
+                    except Exception:
+                        pass   # non-fatal: keep recording in the old file
 
             if msg.arbitration_id not in self._frame_id_lookup:
                 continue

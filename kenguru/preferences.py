@@ -18,11 +18,23 @@ from . import theme as th
 # Keys that live only in RAM and must not be written to disk or exported.
 PREFS_SKIP: frozenset[str] = frozenset({"filename_counter"})
 
+# Chunk duration options shown in the dialog: label → seconds (0 = off)
+CHUNK_OPTIONS: dict[str, int] = {
+    "Off":        0,
+    "1 minute":   60,
+    "5 minutes":  300,
+    "10 minutes": 600,
+    "30 minutes": 1800,
+}
+# Reverse map for populating the dropdown from a saved integer value
+_CHUNK_LABEL: dict[int, str] = {v: k for k, v in CHUNK_OPTIONS.items()}
+
 _DEFAULT_PREFS: dict = {
     "save_dir":         os.path.join(os.path.expanduser("~"), "Documents", "CAN_Logs"),
     "filename_mode":    "timestamp",
     "filename_prefix":  "CAN_Record",
     "filename_counter": 1,
+    "chunk_duration":   0,          # seconds; 0 = disabled
     "meta_project":     "",
     "meta_vehicle":     "",
     "meta_driver":      "",
@@ -133,15 +145,7 @@ class PreferencesManager:
         parent: tk.Widget,
         on_apply: Callable[[], None],
     ) -> None:
-        """Open the Preferences Toplevel.
-
-        Parameters
-        ----------
-        parent:
-            Owner window.
-        on_apply:
-            Callback fired after OK so the caller can refresh dependent widgets.
-        """
+        """Open the Preferences Toplevel."""
         win = tk.Toplevel(parent)
         win.title("Preferences")
         win.resizable(True, False)
@@ -170,7 +174,7 @@ class PreferencesManager:
             if chosen:
                 dir_var.set(chosen)
 
-        ttk.Button(dir_frame, text="Browse…", command=browse_dir).grid(
+        ttk.Button(dir_frame, text="Browse...", command=browse_dir).grid(
             row=0, column=1, pady=4)
         dir_frame.columnconfigure(0, weight=1)
 
@@ -218,6 +222,28 @@ class PreferencesManager:
         ttk.Label(name_frame, textvariable=preview_var,
                   foreground=th.ACCENT2).grid(
             row=2, column=0, columnspan=5, sticky="w", pady=(6, 2))
+
+        # ── Chunk recording ──────────────────────────────────────────
+        chunk_frame = ttk.LabelFrame(gen_tab, text="Chunk Recording", padding=8)
+        chunk_frame.pack(fill="x", padx=12, pady=4)
+
+        ttk.Label(chunk_frame, text="Split recording every:").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+
+        current_label = _CHUNK_LABEL.get(self.prefs["chunk_duration"], "Off")
+        chunk_var = tk.StringVar(value=current_label)
+        ttk.Combobox(
+            chunk_frame, textvariable=chunk_var,
+            values=list(CHUNK_OPTIONS.keys()),
+            state="readonly", width=12,
+        ).grid(row=0, column=1, sticky="w", pady=4)
+
+        ttk.Label(
+            chunk_frame,
+            text="Each chunk gets its own BLF + video file.\n"
+                 "Files are named automatically with a timestamp or counter suffix.",
+            foreground=th.MUTED, font=("Consolas", 9),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
         # ── Session Info Template ────────────────────────────────────
         si_frame = ttk.LabelFrame(
@@ -282,7 +308,7 @@ class PreferencesManager:
                 if p:
                     var.set(p)
 
-            ttk.Button(fn_frame, text="…", width=2,
+            ttk.Button(fn_frame, text="...", width=2,
                        command=_browse_exe).grid(
                 row=n - 1, column=4, padx=(4, 0), pady=3)
         fn_frame.columnconfigure(3, weight=1)
@@ -298,6 +324,7 @@ class PreferencesManager:
             self.prefs["filename_mode"]    = mode_var.get()
             self.prefs["filename_prefix"]  = prefix_var.get().strip() or "CAN_Record"
             self.prefs["filename_counter"] = counter_var.get()
+            self.prefs["chunk_duration"]   = CHUNK_OPTIONS.get(chunk_var.get(), 0)
             for key, var in si_vars.items():
                 self.prefs[key] = var.get().strip()
             self.prefs["meta_comment"] = comment_text.get("1.0", "end-1c").strip()
