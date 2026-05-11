@@ -435,6 +435,22 @@ class CANSession:
         # 6. Start new video chunk
         self._app.camera.start_recording(new_filename)
 
+        # 7. Fire robocopy if the trigger condition is met
+        self._maybe_run_robocopy()
+
+    def _maybe_run_robocopy(self) -> None:
+        """Fire robocopy if the configured trigger condition is satisfied.
+
+        Reads the source directory from prefs, counts completed .blf files
+        on disk, and delegates the trigger decision to
+        ``PreferencesManager.should_run_robocopy()``.  Runs in the receive
+        loop thread — uses only file I/O, no Tkinter calls.
+        """
+        pm  = self._app.prefs_mgr
+        src = pm.prefs.get("rcopy_src", "").strip() or pm.prefs.get("save_dir", "")
+        if pm.should_run_robocopy(src):
+            pm.run_robocopy()
+
     # ── Receive loop ─────────────────────────────────────────────────
 
     def receive_loop(self) -> None:
