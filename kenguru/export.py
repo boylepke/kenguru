@@ -108,48 +108,37 @@ class ExportManager:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save BLF file:\n{e}")
 
-    # ── Export MF4 ───────────────────────────────────────────────────
+    # ── Auto-convert MF4 ─────────────────────────────────────────────
 
-    def export_mf4(self) -> None:
-        """Convert the last recorded BLF to MF4 using asammdf."""
+    def auto_convert_mf4(self, blf_path: str) -> None:
+        """Convert *blf_path* to MF4 silently — no dialogs, no user interaction.
+
+        Saves the .mf4 alongside the .blf with the same stem.  Called
+        automatically by ``CANSession.stop()`` and ``_rotate_chunk()``
+        when the preference is enabled.  Safe to call from any thread.
+        """
         session = self._app.session
-        if not session.last_blf_filename or not os.path.exists(session.last_blf_filename):
-            messagebox.showwarning(
-                "Warning",
-                "No recorded BLF file available.\nPlease record a session first.",
-            )
+        if not blf_path or not os.path.exists(blf_path):
             return
         if not session.dbs:
-            messagebox.showwarning(
-                "Warning",
-                "No DBC loaded.\nA DBC is required to decode signals for MF4 export.",
-            )
             return
 
         try:
             import asammdf
             import numpy as np
-        except ImportError as e:
-            messagebox.showerror(
-                "Error", f"Missing library: {e}\nRun: pip install asammdf numpy")
-            return
+        except ImportError:
+            return      # silently skip if asammdf not installed
 
-        save_path = filedialog.asksaveasfilename(
-            defaultextension=".mf4",
-            filetypes=[("MF4 files", "*.mf4"), ("All files", "*.*")],
-            initialfile=os.path.splitext(
-                os.path.basename(session.last_blf_filename))[0] + ".mf4",
-        )
-        if not save_path:
-            return
+        mf4_path = os.path.splitext(blf_path)[0] + ".mf4"
 
         try:
             series: dict = {}
-            with can.BLFReader(session.last_blf_filename) as reader:
+            with can.BLFReader(blf_path) as reader:
                 t0 = reader.start_timestamp
                 for msg in reader:
                     try:
-                        db_msg, decoded = session._db_decode(msg.arbitration_id, msg.data)
+                        db_msg, decoded = session._db_decode(
+                            msg.arbitration_id, msg.data)
                     except Exception:
                         continue
                     for sig_name, value in decoded.items():
@@ -160,10 +149,6 @@ class ExportManager:
                         series[full_name][1].append(float(value))
 
             if not series:
-                messagebox.showwarning(
-                    "Warning",
-                    "No decodable signals found in the BLF file.\n"
-                    "Make sure the correct DBC is loaded.")
                 return
 
             signals = []
@@ -175,7 +160,7 @@ class ExportManager:
                         try:
                             db_msg = db.get_message_by_name(parts[0])
                             db_sig = db_msg.get_signal_by_name(parts[1])
-                            unit   = db_sig.unit or ""
+                            unit = db_sig.unit or ""
                             break
                         except Exception:
                             continue
@@ -188,7 +173,7 @@ class ExportManager:
                     unit=unit,
                 ))
 
-            mdf  = asammdf.MDF(version="4.10")
+            mdf = asammdf.MDF(version="4.10")
             mdf.append(signals, common_timebase=False)
             meta = self.get_metadata()
             mdf.header.author     = meta["Driver"]
@@ -196,12 +181,9 @@ class ExportManager:
             mdf.header.subject    = meta["Vehicle"]
             mdf.header.department = meta["Configuration"]
             mdf.header.comment    = meta["Comment"]
-            mdf.save(save_path, overwrite=True)
-            messagebox.showinfo(
-                "Success",
-                f"MF4 exported with {len(signals)} signals to:\n{save_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to export MF4:\n{e}")
+            mdf.save(mf4_path, overwrite=True)
+        except Exception:
+            pass        # non-fatal: BLF is the primary format
 
     # ── Export CSV ───────────────────────────────────────────────────
 

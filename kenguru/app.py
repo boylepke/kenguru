@@ -174,7 +174,6 @@ class CANLoggerApp:
 
     def save_blf(self)     -> None: self.export_mgr.save_blf()
     def export_csv(self)   -> None: self.export_mgr.export_csv()
-    def export_mf4(self)   -> None: self.export_mgr.export_mf4()
 
     # ── Tree management ───────────────────────────────────────────────
 
@@ -471,10 +470,7 @@ class CANLoggerApp:
             row=1, column=1, padx=4, pady=(1, 2), sticky="we")
         ttk.Button(op_frame, text="Export CSV",
                    command=self.export_csv).grid(
-            row=1, column=2, padx=4, pady=(1, 2), sticky="we")
-        ttk.Button(op_frame, text="Export MF4",
-                   command=self.export_mf4).grid(
-            row=1, column=3, padx=(4, 16), pady=(1, 2), sticky="we")
+            row=1, column=2, padx=(4, 16), pady=(1, 2), sticky="we")
 
         # F-buttons
         ttk.Separator(op_frame, orient="vertical").grid(

@@ -52,6 +52,7 @@ _DEFAULT_PREFS: dict = {
     "filename_prefix":    "CAN_Record",
     "filename_counter":   1,
     "chunk_duration":     0,
+    "auto_mf4":           True,
     "rcopy_enabled":      False,
     "rcopy_src":          "",
     "rcopy_dst":          "",
@@ -258,6 +259,8 @@ class PreferencesManager:
                     self.prefs["meta_comment"] = W["comment_text"].get("1.0", "end-1c").strip()
                 if "chunk_var" in W:
                     self.prefs["chunk_duration"] = CHUNK_OPTIONS.get(W["chunk_var"].get(), 0)
+                if "auto_mf4_var" in W:
+                    self.prefs["auto_mf4"] = W["auto_mf4_var"].get()
                 if "fn_vars" in W:
                     for key, var in W["fn_vars"].items():
                         self.prefs[key] = var.get().strip()
@@ -454,6 +457,12 @@ class PreferencesManager:
                      values=list(CHUNK_OPTIONS.keys()),
                      state="readonly", width=12,
                      ).grid(row=0, column=1, sticky="w", pady=4)
+
+        auto_mf4_var = tk.BooleanVar(value=self.prefs.get("auto_mf4", True))
+        W["auto_mf4_var"] = auto_mf4_var
+        ttk.Checkbutton(chunk_frame, text="Auto-convert to MF4 after recording",
+                        variable=auto_mf4_var).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
         # ── Function buttons ─────────────────────────────────────────
         fn_frame = ttk.LabelFrame(
