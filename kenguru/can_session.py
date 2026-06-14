@@ -33,6 +33,7 @@ class CANSession:
 
         # ── CAN bus ───────────────────────────────────────────────
         self.bus:  can.BusABC | VirtualCANBus | None = None
+        self._all_buses: list = []    # all open bus instances (for dual-channel)
         self.db:   object | None = None
         self.dbs:  list[tuple[str, object]] = []
 
@@ -162,6 +163,7 @@ class CANSession:
     def connect(self, silent: bool = False) -> None:
         interface = self._app.interface_var.get()
         fd_mode   = self._app.fd_var.get()
+        self._all_buses = []
         try:
             if interface == "Virtual CAN":
                 if not self.dbs:
@@ -173,6 +175,7 @@ class CANSession:
                         self.messages = [m for _, db in dbs for m in db.messages]
                 self.bus = VirtualCANBus(
                     _CombinedDB(self.dbs), msg_rate_hz=100.0, fd=fd_mode)
+                self._all_buses = [self.bus]
                 if not silent:
                     messagebox.showinfo("Success",
                         f"Virtual CAN bus started ({'CAN-FD' if fd_mode else 'classic CAN'}).")
@@ -202,12 +205,20 @@ class CANSession:
                     if not silent:
                         messagebox.showinfo("Success",
                             f"Connected to Vector (classic CAN, {bitrate//1000} kbps).")
+                self._all_buses = [self.bus]
+
             elif interface == "Canalyst-II":
-                self.bus = can.interface.Bus(
-                    interface="canalystii", channel=channel, bitrate=bitrate)
+                # Open both channels simultaneously
+                bus_ch0 = can.interface.Bus(
+                    interface="canalystii", channel=0, bitrate=bitrate)
+                bus_ch1 = can.interface.Bus(
+                    interface="canalystii", channel=1, bitrate=bitrate)
+                self.bus = bus_ch0              # primary reference
+                self._all_buses = [bus_ch0, bus_ch1]
                 if not silent:
                     messagebox.showinfo("Success",
-                        f"Connected to Canalyst-II ({bitrate//1000} kbps).")
+                        f"Connected to Canalyst-II, both channels ({bitrate//1000} kbps).")
+
         except Exception as e:
             messagebox.showerror("Error", f"Connection failed:\n{e}")
 
@@ -378,11 +389,13 @@ class CANSession:
             self.blf_writer = None
 
         if self.bus:
-            try:
-                self.bus.shutdown()
-            except Exception:
-                pass
+            for b in self._all_buses:
+                try:
+                    b.shutdown()
+                except Exception:
+                    pass
             self.bus = None
+            self._all_buses = []
 
         self._app.set_status("idle")
         self._rec_size_history.clear()
@@ -416,67 +429,84 @@ class CANSession:
     # ── Receive loop ─────────────────────────────────────────────────
 
     def receive_loop(self) -> None:
-        if self.recording and self.bus is not None:
-            while True:
-                try:
-                    stale = self.bus.recv(timeout=0)
-                except Exception:
-                    break
-                if stale is None:
-                    break
+        buses = self._all_buses or ([self.bus] if self.bus else [])
+        if not buses:
+            return
+
+        # Drain stale hardware buffers on ALL buses
+        if self.recording:
+            for b in buses:
+                while True:
+                    try:
+                        stale = b.recv(timeout=0)
+                    except Exception:
+                        break
+                    if stale is None:
+                        break
 
         chunk_secs = self._app.prefs_mgr.prefs.get("chunk_duration", 0)
 
+        # Short timeout per bus so we cycle through all channels quickly.
+        # With N buses, worst-case latency per message = N * poll_timeout.
+        poll_timeout = 0.05 if len(buses) > 1 else 1.0
+
         while not self._stop_event.is_set():
-            bus = self.bus
-            if bus is None:
-                break
-            try:
-                msg = bus.recv(timeout=1)
-            except can.CanError as e:
-                if not self._stop_event.is_set():
-                    self._app.root.after(
-                        0, lambda err=e: messagebox.showerror(
-                            "CAN Error", f"Bus error in receive loop:\n{err}"))
-                break
-            except Exception as e:
-                if not self._stop_event.is_set():
-                    self._app.root.after(
-                        0, lambda err=e: messagebox.showerror(
-                            "Error", f"Unexpected error in receive loop:\n{err}"))
-                break
+            got_any = False
 
-            if msg is None:
-                continue
+            for bus in buses:
+                if self._stop_event.is_set():
+                    return
+                try:
+                    msg = bus.recv(timeout=poll_timeout)
+                except can.CanError as e:
+                    if not self._stop_event.is_set():
+                        self._app.root.after(
+                            0, lambda err=e: messagebox.showerror(
+                                "CAN Error", f"Bus error in receive loop:\n{err}"))
+                    return
+                except Exception as e:
+                    if not self._stop_event.is_set():
+                        self._app.root.after(
+                            0, lambda err=e: messagebox.showerror(
+                                "Error", f"Unexpected error in receive loop:\n{err}"))
+                    return
 
-            if self.recording and self.blf_writer:
-                self._record_go.wait()
-                self.blf_writer.on_message_received(msg)
+                if msg is None:
+                    continue
+                got_any = True
 
-                if self._first_can_msg_time is None:
-                    self._first_can_msg_time      = msg.timestamp
-                    self._first_can_msg_wall_time = time.time()
-                    self._first_can_msg_mono      = \
-                        time.monotonic() - self._record_start_mono
+                if self.recording and self.blf_writer:
+                    self._record_go.wait()
+                    self.blf_writer.on_message_received(msg)
 
-                # Chunk boundary check
-                if chunk_secs > 0 and \
-                        (time.monotonic() - self._chunk_start_mono) >= chunk_secs:
-                    try:
-                        self._rotate_chunk()
-                    except Exception:
-                        pass
+                    if self._first_can_msg_time is None:
+                        self._first_can_msg_time      = msg.timestamp
+                        self._first_can_msg_wall_time = time.time()
+                        self._first_can_msg_mono      = \
+                            time.monotonic() - self._record_start_mono
 
-            if msg.arbitration_id not in self._frame_id_lookup:
-                continue
+                    # Chunk boundary check
+                    if chunk_secs > 0 and \
+                            (time.monotonic() - self._chunk_start_mono) >= chunk_secs:
+                        try:
+                            self._rotate_chunk()
+                        except Exception:
+                            pass
 
-            try:
-                db_msg, decoded = self._db_decode(msg.arbitration_id, msg.data)
-                now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                with self._lock:
-                    for full_name, sig_name in self._frame_id_lookup[msg.arbitration_id]:
-                        if sig_name in decoded:
-                            self.signal_latest_values[full_name] = decoded[sig_name]
-                            self.signal_last_seen[full_name]     = now_str
-            except Exception:
-                pass
+                if msg.arbitration_id not in self._frame_id_lookup:
+                    continue
+
+                try:
+                    db_msg, decoded = self._db_decode(msg.arbitration_id, msg.data)
+                    now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    with self._lock:
+                        for full_name, sig_name in self._frame_id_lookup[msg.arbitration_id]:
+                            if sig_name in decoded:
+                                self.signal_latest_values[full_name] = decoded[sig_name]
+                                self.signal_last_seen[full_name]     = now_str
+                except Exception:
+                    pass
+
+            # Avoid busy-loop when no messages arrive on any bus
+            if not got_any and len(buses) > 1:
+                time.sleep(0.001)
