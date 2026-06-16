@@ -21,6 +21,8 @@ import tkinter as tk
 from collections import deque
 from tkinter import messagebox, ttk
 
+import can
+
 try:
     import cv2 as _cv2
     _CV2_AVAILABLE = True
@@ -146,6 +148,30 @@ class CANLoggerApp:
 
     def on_interface_changed(self, event=None) -> None:
         self.session.auto_detect_channels()
+
+    def _on_secondary_changed(self, event=None) -> None:
+        """Update secondary channel dropdown based on selected interface."""
+        iface = self.interface2_var.get()
+        if iface == "None":
+            self.channel2_dropdown["values"] = []
+            self.channel2_var.set("")
+            self.channel2_dropdown.config(state="disabled")
+            self.bitrate2_entry.config(state="disabled")
+        elif iface == "Canalyst-II":
+            self.channel2_dropdown["values"] = ["0+1  (both)"]
+            self.channel2_var.set("0+1  (both)")
+            self.channel2_dropdown.config(state="readonly")
+            self.bitrate2_entry.config(state="normal")
+        elif iface == "Vector":
+            try:
+                configs  = can.detect_available_configs(interfaces=["vector"])
+                channels = [str(cfg["channel"]) for cfg in configs] or ["0"]
+            except Exception:
+                channels = ["0"]
+            self.channel2_dropdown["values"] = channels
+            self.channel2_var.set(channels[0])
+            self.channel2_dropdown.config(state="readonly")
+            self.bitrate2_entry.config(state="normal")
 
     def _on_fd_toggled(self) -> None:
         if self.fd_var.get():
@@ -306,10 +332,11 @@ class CANLoggerApp:
         conn_frame = ttk.LabelFrame(main_frame, text="Connection & Camera", padding=6)
         conn_frame.pack(fill="x", pady=(0, 3))
 
-        # Row 0: interface / channel / bitrate / FD / update rate / connect
-        ttk.Label(conn_frame, text="Interface:").grid(
+        # Row 0: PRIMARY interface
+        ttk.Label(conn_frame, text="Primary:", foreground=th.ACCENT,
+                  font=("Consolas", 10, "bold")).grid(
             row=0, column=0, sticky="w", padx=4, pady=2)
-        self.interface_var = tk.StringVar(value="Vector")
+        self.interface_var = tk.StringVar(value="Canalyst-II")
         interface_menu = ttk.Combobox(
             conn_frame, textvariable=self.interface_var,
             values=["Vector", "Canalyst-II", "Virtual CAN"],
@@ -321,10 +348,10 @@ class CANLoggerApp:
         self.channel_label.grid(row=0, column=2, sticky="w", padx=4, pady=2)
         self.channel_var = tk.StringVar()
         self.channel_dropdown = ttk.Combobox(
-            conn_frame, textvariable=self.channel_var, state="readonly", width=10)
+            conn_frame, textvariable=self.channel_var, state="readonly", width=6)
         self.channel_dropdown.grid(row=0, column=3, padx=4, pady=2)
 
-        ttk.Label(conn_frame, text="Arb. BR (kbps):").grid(
+        ttk.Label(conn_frame, text="BR (kbps):").grid(
             row=0, column=4, sticky="w", padx=4, pady=2)
         self.bitrate_var = tk.StringVar(value="500")
         ttk.Entry(conn_frame, textvariable=self.bitrate_var, width=7).grid(
@@ -336,7 +363,7 @@ class CANLoggerApp:
             command=self._on_fd_toggled)
         self.fd_check.grid(row=0, column=6, padx=(8, 2), pady=2, sticky="w")
 
-        self.fd_data_br_label = ttk.Label(conn_frame, text="Data BR (kbps):")
+        self.fd_data_br_label = ttk.Label(conn_frame, text="Data BR:")
         self.fd_data_br_label.grid(row=0, column=7, sticky="w", padx=4, pady=2)
         self.fd_data_bitrate_var = tk.StringVar(value="2000")
         self.fd_data_br_entry   = ttk.Entry(
@@ -361,12 +388,39 @@ class CANLoggerApp:
             conn_frame, text="Connect", command=self.connect)
         self.connect_btn.grid(row=0, column=11, padx=4, pady=2)
 
-        # Row 1: DBC files (multi-load)
+        # Row 1: SECONDARY interface
+        ttk.Label(conn_frame, text="Secondary:", foreground=th.ACCENT2,
+                  font=("Consolas", 10, "bold")).grid(
+            row=1, column=0, sticky="w", padx=4, pady=2)
+        self.interface2_var = tk.StringVar(value="None")
+        self.interface2_menu = ttk.Combobox(
+            conn_frame, textvariable=self.interface2_var,
+            values=["None", "Vector", "Canalyst-II"],
+            state="readonly", width=12)
+        self.interface2_menu.grid(row=1, column=1, padx=4, pady=2)
+        self.interface2_menu.bind("<<ComboboxSelected>>",
+                                  self._on_secondary_changed)
+
+        self.channel2_label = ttk.Label(conn_frame, text="Channel:")
+        self.channel2_label.grid(row=1, column=2, sticky="w", padx=4, pady=2)
+        self.channel2_var = tk.StringVar()
+        self.channel2_dropdown = ttk.Combobox(
+            conn_frame, textvariable=self.channel2_var, state="disabled", width=6)
+        self.channel2_dropdown.grid(row=1, column=3, padx=4, pady=2)
+
+        ttk.Label(conn_frame, text="BR (kbps):").grid(
+            row=1, column=4, sticky="w", padx=4, pady=2)
+        self.bitrate2_var = tk.StringVar(value="500")
+        self.bitrate2_entry = ttk.Entry(
+            conn_frame, textvariable=self.bitrate2_var, width=7, state="disabled")
+        self.bitrate2_entry.grid(row=1, column=5, padx=4, pady=2)
+
+        # Row 2: DBC files (multi-load)
         ttk.Label(conn_frame, text="DBC Files:").grid(
-            row=1, column=0, sticky="nw", padx=4, pady=2)
+            row=2, column=0, sticky="nw", padx=4, pady=2)
 
         dbc_list_frame = ttk.Frame(conn_frame)
-        dbc_list_frame.grid(row=1, column=1, columnspan=7, sticky="we", padx=4, pady=2)
+        dbc_list_frame.grid(row=2, column=1, columnspan=7, sticky="we", padx=4, pady=2)
 
         self.dbc_listbox = tk.Listbox(
             dbc_list_frame, height=3, selectmode="single",
@@ -379,67 +433,67 @@ class CANLoggerApp:
         dbc_sb.pack(side="right", fill="y")
 
         dbc_btn_frame = ttk.Frame(conn_frame)
-        dbc_btn_frame.grid(row=1, column=8, sticky="ns", padx=4, pady=2)
+        dbc_btn_frame.grid(row=2, column=8, sticky="ns", padx=4, pady=2)
         ttk.Button(dbc_btn_frame, text="Add DBC",
                    command=self.load_dbc).pack(fill="x", pady=(0, 2))
         ttk.Button(dbc_btn_frame, text="Remove",
                    command=self.remove_dbc).pack(fill="x")
 
-        # Row 2: Camera
+        # Row 3: Camera
         if not _CV2_AVAILABLE:
             ttk.Label(conn_frame,
                       text="Camera: opencv-python not installed  —  pip install opencv-python",
                       foreground="gray").grid(
-                row=2, column=0, columnspan=9, sticky="w", padx=4, pady=2)
+                row=3, column=0, columnspan=9, sticky="w", padx=4, pady=2)
         else:
             ttk.Label(conn_frame, text="Camera:").grid(
-                row=2, column=0, sticky="w", padx=4, pady=2)
+                row=3, column=0, sticky="w", padx=4, pady=2)
             self.cam_var = tk.StringVar(value="None detected")
             self.cam_dropdown = ttk.Combobox(
                 conn_frame, textvariable=self.cam_var, state="readonly", width=18)
-            self.cam_dropdown.grid(row=2, column=1, padx=4, pady=2)
+            self.cam_dropdown.grid(row=3, column=1, padx=4, pady=2)
             self.cam_dropdown.bind("<<ComboboxSelected>>",
                                    self.camera.on_camera_selected)
 
             ttk.Label(conn_frame, text="Resolution:").grid(
-                row=2, column=2, sticky="w", padx=4, pady=2)
+                row=3, column=2, sticky="w", padx=4, pady=2)
             self.cam_res_var = tk.StringVar(value="1280x720")
             ttk.Combobox(conn_frame, textvariable=self.cam_res_var,
                          values=["640x480", "1280x720", "1920x1080"],
                          state="readonly", width=11).grid(
-                row=2, column=3, padx=4, pady=2)
+                row=3, column=3, padx=4, pady=2)
 
             ttk.Label(conn_frame, text="FPS:").grid(
-                row=2, column=4, sticky="w", padx=4, pady=2)
+                row=3, column=4, sticky="w", padx=4, pady=2)
             self.cam_fps_var = tk.StringVar(value="30")
             ttk.Combobox(conn_frame, textvariable=self.cam_fps_var,
                          values=["15", "25", "30", "60"],
                          state="readonly", width=5).grid(
-                row=2, column=5, padx=4, pady=2)
+                row=3, column=5, padx=4, pady=2)
 
             ttk.Label(conn_frame, text="Quality:").grid(
-                row=2, column=6, sticky="w", padx=4, pady=2)
+                row=3, column=6, sticky="w", padx=4, pady=2)
             self.cam_quality_var = tk.StringVar(value="Medium")
             ttk.Combobox(conn_frame, textvariable=self.cam_quality_var,
                          values=["Low (smallest)", "Medium", "High", "Max (largest)"],
                          state="readonly", width=14).grid(
-                row=2, column=7, padx=4, pady=2)
+                row=3, column=7, padx=4, pady=2)
 
             ttk.Button(conn_frame, text="Detect Cameras",
                        command=self.camera.detect_cameras).grid(
-                row=2, column=8, padx=4, pady=2)
+                row=3, column=8, padx=4, pady=2)
             ttk.Button(conn_frame, text="Preview",
                        command=self.camera.open_preview).grid(
-                row=2, column=9, padx=4, pady=2)
+                row=3, column=9, padx=4, pady=2)
 
             self.record_video_var = tk.BooleanVar(value=True)
             ttk.Checkbutton(conn_frame, text="Record video",
                             variable=self.record_video_var).grid(
-                row=2, column=10, padx=4, pady=2, sticky="w")
+                row=3, column=10, padx=4, pady=2, sticky="w")
 
             self.cam_status_label = ttk.Label(
                 conn_frame, text="No camera selected", foreground="gray")
-            self.cam_status_label.grid(row=2, column=11, padx=8, pady=2)
+            self.cam_status_label.grid(row=3, column=11, padx=8, pady=2)
 
         conn_frame.columnconfigure(1, weight=1)
 

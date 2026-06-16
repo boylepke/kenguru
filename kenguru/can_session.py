@@ -161,66 +161,88 @@ class CANSession:
     # ── Connection ────────────────────────────────────────────────────
 
     def connect(self, silent: bool = False) -> None:
-        interface = self._app.interface_var.get()
-        fd_mode   = self._app.fd_var.get()
         self._all_buses = []
+
+        # ── Primary interface ─────────────────────────────────────────
+        primary = self._app.interface_var.get()
+        fd_mode = self._app.fd_var.get()
         try:
-            if interface == "Virtual CAN":
-                if not self.dbs:
-                    messagebox.showwarning("Warning",
-                        "Load a DBC file first — the virtual bus needs it to generate frames.")
-                    return
-                class _CombinedDB:
-                    def __init__(self, dbs):
-                        self.messages = [m for _, db in dbs for m in db.messages]
-                self.bus = VirtualCANBus(
-                    _CombinedDB(self.dbs), msg_rate_hz=100.0, fd=fd_mode)
-                self._all_buses = [self.bus]
-                if not silent:
-                    messagebox.showinfo("Success",
-                        f"Virtual CAN bus started ({'CAN-FD' if fd_mode else 'classic CAN'}).")
+            self._connect_one(
+                primary, fd_mode,
+                self._app.channel_var,
+                self._app.bitrate_var,
+                is_primary=True, silent=silent,
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Primary connection failed:\n{e}")
+            return
+
+        # ── Secondary interface ───────────────────────────────────────
+        secondary = self._app.interface2_var.get()
+        if secondary != "None":
+            try:
+                self._connect_one(
+                    secondary, False,    # FD only on primary for now
+                    self._app.channel2_var,
+                    self._app.bitrate2_var,
+                    is_primary=False, silent=silent,
+                )
+            except Exception as e:
+                messagebox.showerror("Error", f"Secondary connection failed:\n{e}")
                 return
 
-            bitrate = int(self._app.bitrate_var.get()) * 1000
-            channel = int(self._app.channel_var.get())
+        # self.bus = first bus opened (backwards compat for timecode etc.)
+        if self._all_buses:
+            self.bus = self._all_buses[0]
 
-            if interface == "Vector":
-                if fd_mode:
-                    try:
-                        data_bitrate = int(self._app.fd_data_bitrate_var.get()) * 1000
-                    except ValueError:
-                        messagebox.showerror("Error",
-                            "Invalid data bitrate — enter a number in kbps (e.g. 2000).")
-                        return
-                    self.bus = can.interface.Bus(
-                        interface="vector", channel=channel,
-                        bitrate=bitrate, data_bitrate=data_bitrate, fd=True)
-                    if not silent:
-                        messagebox.showinfo("Success",
-                            f"Connected to Vector in CAN-FD mode.\n"
-                            f"Arb: {bitrate//1000} kbps  |  Data: {data_bitrate//1000} kbps")
-                else:
-                    self.bus = can.interface.Bus(
-                        interface="vector", channel=channel, bitrate=bitrate)
-                    if not silent:
-                        messagebox.showinfo("Success",
-                            f"Connected to Vector (classic CAN, {bitrate//1000} kbps).")
-                self._all_buses = [self.bus]
+        if not silent and self._all_buses:
+            n = len(self._all_buses)
+            messagebox.showinfo("Success",
+                f"Connected — {n} CAN bus{'es' if n > 1 else ''} active.")
 
-            elif interface == "Canalyst-II":
-                # Open both channels simultaneously
-                bus_ch0 = can.interface.Bus(
-                    interface="canalystii", channel=0, bitrate=bitrate)
-                bus_ch1 = can.interface.Bus(
-                    interface="canalystii", channel=1, bitrate=bitrate)
-                self.bus = bus_ch0              # primary reference
-                self._all_buses = [bus_ch0, bus_ch1]
-                if not silent:
-                    messagebox.showinfo("Success",
-                        f"Connected to Canalyst-II, both channels ({bitrate//1000} kbps).")
+    def _connect_one(self, interface: str, fd_mode: bool,
+                     channel_var, bitrate_var,
+                     is_primary: bool, silent: bool) -> None:
+        """Open one interface and append its bus(es) to ``_all_buses``."""
+        if interface == "Virtual CAN":
+            if not self.dbs:
+                messagebox.showwarning("Warning",
+                    "Load a DBC file first — the virtual bus needs it to generate frames.")
+                return
+            class _CombinedDB:
+                def __init__(self, dbs):
+                    self.messages = [m for _, db in dbs for m in db.messages]
+            bus = VirtualCANBus(
+                _CombinedDB(self.dbs), msg_rate_hz=100.0, fd=fd_mode)
+            self._all_buses.append(bus)
+            return
 
-        except Exception as e:
-            messagebox.showerror("Error", f"Connection failed:\n{e}")
+        bitrate = int(bitrate_var.get()) * 1000
+
+        if interface == "Canalyst-II":
+            # Always open both channels
+            bus0 = can.interface.Bus(
+                interface="canalystii", channel=0, bitrate=bitrate)
+            bus1 = can.interface.Bus(
+                interface="canalystii", channel=1, bitrate=bitrate)
+            self._all_buses.extend([bus0, bus1])
+
+        elif interface == "Vector":
+            channel = int(channel_var.get())
+            if fd_mode and is_primary:
+                try:
+                    data_bitrate = int(self._app.fd_data_bitrate_var.get()) * 1000
+                except ValueError:
+                    messagebox.showerror("Error",
+                        "Invalid data bitrate — enter a number in kbps.")
+                    return
+                bus = can.interface.Bus(
+                    interface="vector", channel=channel,
+                    bitrate=bitrate, data_bitrate=data_bitrate, fd=True)
+            else:
+                bus = can.interface.Bus(
+                    interface="vector", channel=channel, bitrate=bitrate)
+            self._all_buses.append(bus)
 
     def auto_detect_channels(self) -> None:
         interface = self._app.interface_var.get()
